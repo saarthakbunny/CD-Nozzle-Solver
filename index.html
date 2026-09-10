@@ -5,8 +5,27 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CD Nozzle Surrogate Solver</title>
 <script src="https://cdn.tailwindcss.com"></script>
+
+<!-- Firebase (needed live -- this is what makes the shared data actually shared) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
 <script>
-// ---- React (embedded locally -- no CDN dependency for the app to function) ----
+
+const firebaseConfig = {
+  apiKey: "AIzaSyC893kkJ0SEl-5UdnafaGFL6vXHSzccKY8",
+  authDomain: "cd-nozzle-solver.firebaseapp.com",
+  databaseURL: "https://cd-nozzle-solver-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "cd-nozzle-solver",
+  storageBucket: "cd-nozzle-solver.firebasestorage.app",
+  messagingSenderId: "998997983329",
+  appId: "1:998997983329:web:8665c5725d295ee0952a20"
+};
+firebase.initializeApp(firebaseConfig);
+
+</script>
+
+<script>
+// ---- React (embedded locally -- no CDN dependency for the app itself) ----
 /**
  * @license React
  * react.production.min.js
@@ -336,16 +355,26 @@ const PARAM_INFO = {
   P39: { label: "Throat total pressure", unit: "Pa", decimals: 0 }
 };
 const { useState, useEffect, useCallback } = React;
-function gaussianRandom() {
+function makeSeededRandom(seed) {
+  return function() {
+    seed |= 0;
+    seed = seed + 1831565813 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const TRAINING_SEED = 20260910;
+function gaussianRandom(rng) {
   let u = 0, v = 0;
-  while (u === 0) u = Math.random();
-  while (v === 0) v = Math.random();
+  while (u === 0) u = rng();
+  while (v === 0) v = rng();
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
 }
 const zeros1D = (n) => new Array(n).fill(0);
 const zeros2D = (r, c) => Array.from({ length: r }, () => zeros1D(c));
 const zerosLike = (x) => Array.isArray(x) ? x.map(zerosLike) : 0;
-const randMatrix = (r, c, scale) => Array.from({ length: r }, () => Array.from({ length: c }, () => gaussianRandom() * scale));
+const randMatrix = (r, c, scale, rng) => Array.from({ length: r }, () => Array.from({ length: c }, () => gaussianRandom(rng) * scale));
 function colMean(X) {
   const n = X.length, d = X[0].length, mu = zeros1D(d);
   for (const row of X) for (let j = 0; j < d; j++) mu[j] += row[j] / n;
@@ -408,10 +437,11 @@ function forwardSingle(x, W1, b1, W2, b2, W3, b3, h1, h2, nX, nY) {
 }
 function trainModel(dataset, epochs = 2e3) {
   const nX = 7, nY = 6, h1 = 20, h2 = 20, lr = 0.01, lambda = 1e-4;
+  const rng = makeSeededRandom(TRAINING_SEED);
   const n = dataset.length;
   const idx = [...Array(n).keys()];
   for (let i = idx.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = Math.floor(rng() * (i + 1));
     [idx[i], idx[j]] = [idx[j], idx[i]];
   }
   const nTest = Math.max(1, Math.round(0.2 * n));
@@ -424,9 +454,9 @@ function trainModel(dataset, epochs = 2e3) {
   const minX = colMin(Xtr), maxX = colMax(Xtr);
   const Xn = Xtr.map((r) => normRow(r, muX, sigX));
   const Yn = Ytr.map((r) => normRow(r, muY, sigY));
-  let W1 = randMatrix(h1, nX, Math.sqrt(1 / nX)), b1 = zeros1D(h1);
-  let W2 = randMatrix(h2, h1, Math.sqrt(1 / h1)), b2 = zeros1D(h2);
-  let W3 = randMatrix(nY, h2, Math.sqrt(1 / h2)), b3 = zeros1D(nY);
+  let W1 = randMatrix(h1, nX, Math.sqrt(1 / nX), rng), b1 = zeros1D(h1);
+  let W2 = randMatrix(h2, h1, Math.sqrt(1 / h1), rng), b2 = zeros1D(h2);
+  let W3 = randMatrix(nY, h2, Math.sqrt(1 / h2), rng), b3 = zeros1D(nY);
   let mW1 = zerosLike(W1), vW1 = zerosLike(W1), mb1 = zerosLike(b1), vb1 = zerosLike(b1);
   let mW2 = zerosLike(W2), vW2 = zerosLike(W2), mb2 = zerosLike(b2), vb2 = zerosLike(b2);
   let mW3 = zerosLike(W3), vW3 = zerosLike(W3), mb3 = zerosLike(b3), vb3 = zerosLike(b3);
@@ -605,14 +635,15 @@ function NozzleSolver() {
     }, 30);
   }, []);
   useEffect(() => {
-    let loaded = [];
-    try {
-      const stored = localStorage.getItem("nozzle_validated_points");
-      if (stored) loaded = JSON.parse(stored);
-    } catch (e) {
-    }
-    setExtraData(loaded);
-    doTrain([...ORIGINAL_DATASET, ...loaded]);
+    const pointsRef = firebase.database().ref("validated_points");
+    const handler = (snapshot) => {
+      const val = snapshot.val() || {};
+      const loaded = Object.values(val).map((obj) => CODE_ORDER.map((c) => obj[c]));
+      setExtraData(loaded);
+      doTrain([...ORIGINAL_DATASET, ...loaded]);
+    };
+    pointsRef.on("value", handler);
+    return () => pointsRef.off("value", handler);
   }, [doTrain]);
   const handleFieldChange = (code, value) => {
     setFields((prev) => ({ ...prev, [code]: value }));
@@ -679,16 +710,14 @@ function NozzleSolver() {
       setMessage({ type: "error", text: "All 13 fields need a value before this can be added to the training set." });
       return;
     }
-    const newExtra = [...extraData, row];
-    setExtraData(newExtra);
-    try {
-      localStorage.setItem("nozzle_validated_points", JSON.stringify(newExtra));
-    } catch (e) {
-    }
-    setMessage({ type: "success", text: "Added to training data. Retraining on the larger dataset..." });
+    const pointObj = Object.fromEntries(CODE_ORDER.map((c, i) => [c, row[i]]));
+    firebase.database().ref("validated_points").push(pointObj).then(() => {
+      setMessage({ type: "success", text: "Added to the shared global dataset. Retraining for everyone..." });
+    }).catch((e) => {
+      setMessage({ type: "error", text: "Could not save to the shared database: " + e.message });
+    });
     setShowVerify(false);
     setVerifyChecked(false);
-    doTrain([...ORIGINAL_DATASET, ...newExtra]);
   };
   const handleExportCSV = () => {
     if (extraData.length === 0) return;
@@ -704,7 +733,7 @@ function NozzleSolver() {
     URL.revokeObjectURL(url);
   };
   const totalPoints = ORIGINAL_DATASET.length + extraData.length;
-  return /* @__PURE__ */ React.createElement("div", { className: "min-h-screen bg-blue-950 text-slate-100 font-mono p-4 md:p-6" }, /* @__PURE__ */ React.createElement("div", { className: "max-w-4xl mx-auto" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-col md:flex-row md:items-end justify-between border-b-2 border-blue-700 pb-3 mb-6 gap-2" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", { className: "text-lg md:text-xl text-cyan-400 tracking-wide" }, "CD NOZZLE SURROGATE SOLVER"), /* @__PURE__ */ React.createElement("p", { className: "text-xs text-blue-400 mt-1" }, "Fill in what you know \u2014 the rest is solved automatically.")), /* @__PURE__ */ React.createElement("div", { className: "text-xs text-blue-300 text-left md:text-right" }, /* @__PURE__ */ React.createElement("div", null, status === "training" ? "Retraining\u2026" : `Trained on ${totalPoints} points`, extraData.length > 0 && status === "ready" && /* @__PURE__ */ React.createElement("span", { className: "text-emerald-400" }, " (", extraData.length, " validated)")), model && status === "ready" && /* @__PURE__ */ React.createElement("div", { className: "text-blue-500 mt-0.5" }, "avg R\xB2 ", (model.r2.reduce((a, b) => a + b, 0) / model.r2.length).toFixed(3)))), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-2 gap-5" }, /* @__PURE__ */ React.createElement("div", { className: "relative border border-blue-800 bg-blue-900/20 p-4" }, /* @__PURE__ */ React.createElement(CornerTicks, null), /* @__PURE__ */ React.createElement("h2", { className: "text-sm text-blue-300 mb-2 pb-2 border-b border-blue-800" }, "INPUTS \u2014 geometry & boundary conditions"), INPUT_CODES.map((code) => /* @__PURE__ */ React.createElement(Field, { key: code, code, value: fields[code], computed: computed.has(code), editable: status === "ready", onChange: handleFieldChange }))), /* @__PURE__ */ React.createElement("div", { className: "relative border border-blue-800 bg-blue-900/20 p-4" }, /* @__PURE__ */ React.createElement(CornerTicks, null), /* @__PURE__ */ React.createElement("h2", { className: "text-sm text-blue-300 mb-2 pb-2 border-b border-blue-800" }, "OUTPUTS \u2014 performance"), OUTPUT_CODES.map((code) => /* @__PURE__ */ React.createElement(Field, { key: code, code, value: fields[code], computed: computed.has(code), editable: status === "ready", onChange: handleFieldChange })))), /* @__PURE__ */ React.createElement("div", { className: "flex items-center gap-3 mt-5" }, /* @__PURE__ */ React.createElement(
+  return /* @__PURE__ */ React.createElement("div", { className: "min-h-screen bg-blue-950 text-slate-100 font-mono p-4 md:p-6" }, /* @__PURE__ */ React.createElement("div", { className: "max-w-4xl mx-auto" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-col md:flex-row md:items-end justify-between border-b-2 border-blue-700 pb-3 mb-6 gap-2" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", { className: "text-lg md:text-xl text-cyan-400 tracking-wide" }, "CD NOZZLE SURROGATE SOLVER"), /* @__PURE__ */ React.createElement("p", { className: "text-xs text-blue-400 mt-1" }, "Fill in what you know \u2014 the rest is solved automatically. Shared model, live for everyone.")), /* @__PURE__ */ React.createElement("div", { className: "text-xs text-blue-300 text-left md:text-right" }, /* @__PURE__ */ React.createElement("div", null, status === "training" ? "Retraining\u2026" : `Trained on ${totalPoints} points`, extraData.length > 0 && status === "ready" && /* @__PURE__ */ React.createElement("span", { className: "text-emerald-400" }, " (", extraData.length, " community-contributed)")), model && status === "ready" && /* @__PURE__ */ React.createElement("div", { className: "text-blue-500 mt-0.5" }, "avg R\xB2 ", (model.r2.reduce((a, b) => a + b, 0) / model.r2.length).toFixed(3)))), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-2 gap-5" }, /* @__PURE__ */ React.createElement("div", { className: "relative border border-blue-800 bg-blue-900/20 p-4" }, /* @__PURE__ */ React.createElement(CornerTicks, null), /* @__PURE__ */ React.createElement("h2", { className: "text-sm text-blue-300 mb-2 pb-2 border-b border-blue-800" }, "INPUTS \u2014 geometry & boundary conditions"), INPUT_CODES.map((code) => /* @__PURE__ */ React.createElement(Field, { key: code, code, value: fields[code], computed: computed.has(code), editable: status === "ready", onChange: handleFieldChange }))), /* @__PURE__ */ React.createElement("div", { className: "relative border border-blue-800 bg-blue-900/20 p-4" }, /* @__PURE__ */ React.createElement(CornerTicks, null), /* @__PURE__ */ React.createElement("h2", { className: "text-sm text-blue-300 mb-2 pb-2 border-b border-blue-800" }, "OUTPUTS \u2014 performance"), OUTPUT_CODES.map((code) => /* @__PURE__ */ React.createElement(Field, { key: code, code, value: fields[code], computed: computed.has(code), editable: status === "ready", onChange: handleFieldChange })))), /* @__PURE__ */ React.createElement("div", { className: "flex items-center gap-3 mt-5" }, /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: handleSolve,
@@ -718,7 +747,7 @@ function NozzleSolver() {
       className: `mt-4 px-3 py-2 text-sm border ${message.type === "error" ? "border-red-700 text-red-300 bg-red-950/40" : message.type === "success" ? "border-emerald-600 text-emerald-300 bg-emerald-950/40" : "border-blue-700 text-blue-300 bg-blue-900/30"}`
     },
     message.text
-  ), /* @__PURE__ */ React.createElement("div", { className: "flex gap-4 mt-3 text-xs text-blue-500" }, /* @__PURE__ */ React.createElement("span", { className: "flex items-center gap-1" }, /* @__PURE__ */ React.createElement("span", { className: "inline-block w-3 h-3 bg-amber-950/50 border border-amber-600" }), " solved / computed"), /* @__PURE__ */ React.createElement("span", { className: "flex items-center gap-1" }, /* @__PURE__ */ React.createElement("span", { className: "inline-block w-3 h-3 bg-slate-900 border border-slate-600" }), " your value")), showVerify && /* @__PURE__ */ React.createElement("div", { className: "relative border-2 border-dashed border-emerald-700 bg-emerald-950/10 p-4 mt-5" }, /* @__PURE__ */ React.createElement("p", { className: "text-sm text-emerald-300 mb-2" }, "Checked this exact case in Fluent? If any value above doesn't match, edit the field(s) above with the real Fluent result before adding \u2014 otherwise leave them as solved."), /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-2 text-sm text-blue-200 cursor-pointer" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: verifyChecked, onChange: (e) => setVerifyChecked(e.target.checked), className: "accent-emerald-500" }), "Confirmed against a real Fluent run"), /* @__PURE__ */ React.createElement(
+  ), /* @__PURE__ */ React.createElement("div", { className: "flex gap-4 mt-3 text-xs text-blue-500" }, /* @__PURE__ */ React.createElement("span", { className: "flex items-center gap-1" }, /* @__PURE__ */ React.createElement("span", { className: "inline-block w-3 h-3 bg-amber-950/50 border border-amber-600" }), " solved / computed"), /* @__PURE__ */ React.createElement("span", { className: "flex items-center gap-1" }, /* @__PURE__ */ React.createElement("span", { className: "inline-block w-3 h-3 bg-slate-900 border border-slate-600" }), " your value")), showVerify && /* @__PURE__ */ React.createElement("div", { className: "relative border-2 border-dashed border-emerald-700 bg-emerald-950/10 p-4 mt-5" }, /* @__PURE__ */ React.createElement("p", { className: "text-sm text-emerald-300 mb-2" }, "Checked this exact case in Fluent? If any value above doesn't match, edit the field(s) above with the real Fluent result before adding \u2014 otherwise leave them as solved."), /* @__PURE__ */ React.createElement("p", { className: "text-xs text-amber-300 mb-2" }, "This adds the point to the shared global dataset \u2014 visible to, and used in training for, everyone who opens this page."), /* @__PURE__ */ React.createElement("label", { className: "flex items-center gap-2 text-sm text-blue-200 cursor-pointer" }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: verifyChecked, onChange: (e) => setVerifyChecked(e.target.checked), className: "accent-emerald-500" }), "Confirmed against a real Fluent run"), /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: handleAddValidated,
@@ -726,7 +755,7 @@ function NozzleSolver() {
       className: "mt-3 px-4 py-2 bg-emerald-700 hover:bg-emerald-600 disabled:bg-blue-900 disabled:text-blue-600 text-white text-sm font-semibold"
     },
     "Add to training data"
-  )), /* @__PURE__ */ React.createElement("div", { className: "flex flex-col md:flex-row md:items-center justify-between border-t border-blue-800 pt-3 mt-6 text-xs text-blue-400 gap-2" }, /* @__PURE__ */ React.createElement("div", null, ORIGINAL_DATASET.length, " original points", extraData.length > 0 ? ` + ${extraData.length} validated by you` : ""), /* @__PURE__ */ React.createElement("button", { onClick: handleExportCSV, disabled: extraData.length === 0, className: "underline decoration-dotted disabled:opacity-40 disabled:no-underline text-left" }, "Export validated points (CSV)"))));
+  )), /* @__PURE__ */ React.createElement("div", { className: "flex flex-col md:flex-row md:items-center justify-between border-t border-blue-800 pt-3 mt-6 text-xs text-blue-400 gap-2" }, /* @__PURE__ */ React.createElement("div", null, ORIGINAL_DATASET.length, " original points", extraData.length > 0 ? ` + ${extraData.length} contributed globally` : ""), /* @__PURE__ */ React.createElement("button", { onClick: handleExportCSV, disabled: extraData.length === 0, className: "underline decoration-dotted disabled:opacity-40 disabled:no-underline text-left" }, "Export shared dataset (CSV)"))));
 }
 window.NozzleSolver = NozzleSolver;
 
