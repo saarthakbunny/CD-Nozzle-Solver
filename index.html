@@ -626,25 +626,48 @@ function NozzleSolver() {
   const [message, setMessage] = useState(null);
   const [showVerify, setShowVerify] = useState(false);
   const [verifyChecked, setVerifyChecked] = useState(false);
-  const doTrain = useCallback((fullDataset) => {
+  const saveModelToFirebase = (m, pointCount) => {
+    const payload = JSON.stringify({ ...m, pointCount });
+    firebase.database().ref("trained_model").set(payload).catch(() => {
+    });
+  };
+  const trainAndBroadcast = useCallback((fullDataset) => {
     setStatus("training");
     setTimeout(() => {
       const m = trainModel(fullDataset, 2e3);
       setModel(m);
       setStatus("ready");
+      saveModelToFirebase(m, fullDataset.length);
     }, 30);
   }, []);
   useEffect(() => {
     const pointsRef = firebase.database().ref("validated_points");
-    const handler = (snapshot) => {
+    const pointsHandler = (snapshot) => {
       const val = snapshot.val() || {};
       const loaded = Object.values(val).map((obj) => CODE_ORDER.map((c) => obj[c]));
       setExtraData(loaded);
-      doTrain([...ORIGINAL_DATASET, ...loaded]);
     };
-    pointsRef.on("value", handler);
-    return () => pointsRef.off("value", handler);
-  }, [doTrain]);
+    pointsRef.on("value", pointsHandler);
+    const modelRef = firebase.database().ref("trained_model");
+    const modelHandler = (snapshot) => {
+      const val = snapshot.val();
+      if (val) {
+        setModel(JSON.parse(val));
+        setStatus("ready");
+      } else {
+        firebase.database().ref("validated_points").once("value").then((snap) => {
+          const v = snap.val() || {};
+          const loaded = Object.values(v).map((obj) => CODE_ORDER.map((c) => obj[c]));
+          trainAndBroadcast([...ORIGINAL_DATASET, ...loaded]);
+        });
+      }
+    };
+    modelRef.on("value", modelHandler);
+    return () => {
+      pointsRef.off("value", pointsHandler);
+      modelRef.off("value", modelHandler);
+    };
+  }, [trainAndBroadcast]);
   const handleFieldChange = (code, value) => {
     setFields((prev) => ({ ...prev, [code]: value }));
     setComputed((prev) => {
@@ -712,7 +735,8 @@ function NozzleSolver() {
     }
     const pointObj = Object.fromEntries(CODE_ORDER.map((c, i) => [c, row[i]]));
     firebase.database().ref("validated_points").push(pointObj).then(() => {
-      setMessage({ type: "success", text: "Added to the shared global dataset. Retraining for everyone..." });
+      setMessage({ type: "success", text: "Added to the shared global dataset. Retraining and broadcasting the updated model..." });
+      trainAndBroadcast([...ORIGINAL_DATASET, ...extraData, row]);
     }).catch((e) => {
       setMessage({ type: "error", text: "Could not save to the shared database: " + e.message });
     });
@@ -733,7 +757,7 @@ function NozzleSolver() {
     URL.revokeObjectURL(url);
   };
   const totalPoints = ORIGINAL_DATASET.length + extraData.length;
-  return /* @__PURE__ */ React.createElement("div", { className: "min-h-screen bg-blue-950 text-slate-100 font-mono p-4 md:p-6" }, /* @__PURE__ */ React.createElement("div", { className: "max-w-4xl mx-auto" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-col md:flex-row md:items-end justify-between border-b-2 border-blue-700 pb-3 mb-6 gap-2" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", { className: "text-lg md:text-xl text-cyan-400 tracking-wide" }, "CD NOZZLE SURROGATE SOLVER"), /* @__PURE__ */ React.createElement("p", { className: "text-xs text-blue-400 mt-1" }, "Fill in what you know \u2014 the rest is solved automatically. Shared model, live for everyone.")), /* @__PURE__ */ React.createElement("div", { className: "text-xs text-blue-300 text-left md:text-right" }, /* @__PURE__ */ React.createElement("div", null, status === "training" ? "Retraining\u2026" : `Trained on ${totalPoints} points`, extraData.length > 0 && status === "ready" && /* @__PURE__ */ React.createElement("span", { className: "text-emerald-400" }, " (", extraData.length, " community-contributed)")), model && status === "ready" && /* @__PURE__ */ React.createElement("div", { className: "text-blue-500 mt-0.5" }, "avg R\xB2 ", (model.r2.reduce((a, b) => a + b, 0) / model.r2.length).toFixed(3)))), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-2 gap-5" }, /* @__PURE__ */ React.createElement("div", { className: "relative border border-blue-800 bg-blue-900/20 p-4" }, /* @__PURE__ */ React.createElement(CornerTicks, null), /* @__PURE__ */ React.createElement("h2", { className: "text-sm text-blue-300 mb-2 pb-2 border-b border-blue-800" }, "INPUTS \u2014 geometry & boundary conditions"), INPUT_CODES.map((code) => /* @__PURE__ */ React.createElement(Field, { key: code, code, value: fields[code], computed: computed.has(code), editable: status === "ready", onChange: handleFieldChange }))), /* @__PURE__ */ React.createElement("div", { className: "relative border border-blue-800 bg-blue-900/20 p-4" }, /* @__PURE__ */ React.createElement(CornerTicks, null), /* @__PURE__ */ React.createElement("h2", { className: "text-sm text-blue-300 mb-2 pb-2 border-b border-blue-800" }, "OUTPUTS \u2014 performance"), OUTPUT_CODES.map((code) => /* @__PURE__ */ React.createElement(Field, { key: code, code, value: fields[code], computed: computed.has(code), editable: status === "ready", onChange: handleFieldChange })))), /* @__PURE__ */ React.createElement("div", { className: "flex items-center gap-3 mt-5" }, /* @__PURE__ */ React.createElement(
+  return /* @__PURE__ */ React.createElement("div", { className: "min-h-screen bg-blue-950 text-slate-100 font-mono p-4 md:p-6" }, /* @__PURE__ */ React.createElement("div", { className: "max-w-4xl mx-auto" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-col md:flex-row md:items-end justify-between border-b-2 border-blue-700 pb-3 mb-6 gap-2" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", { className: "text-lg md:text-xl text-cyan-400 tracking-wide" }, "CD NOZZLE SURROGATE SOLVER"), /* @__PURE__ */ React.createElement("p", { className: "text-xs text-blue-400 mt-1" }, "Fill in what you know \u2014 the rest is solved automatically. Shared model, live for everyone.")), /* @__PURE__ */ React.createElement("div", { className: "text-xs text-blue-300 text-left md:text-right" }, /* @__PURE__ */ React.createElement("div", null, status === "loading" && "Loading shared model\u2026", status === "training" && "Training (first time for this dataset)\u2026", status === "ready" && `Trained on ${totalPoints} points`, extraData.length > 0 && status === "ready" && /* @__PURE__ */ React.createElement("span", { className: "text-emerald-400" }, " (", extraData.length, " community-contributed)")), model && status === "ready" && /* @__PURE__ */ React.createElement("div", { className: "text-blue-500 mt-0.5" }, "avg R\xB2 ", (model.r2.reduce((a, b) => a + b, 0) / model.r2.length).toFixed(3)))), /* @__PURE__ */ React.createElement("div", { className: "grid md:grid-cols-2 gap-5" }, /* @__PURE__ */ React.createElement("div", { className: "relative border border-blue-800 bg-blue-900/20 p-4" }, /* @__PURE__ */ React.createElement(CornerTicks, null), /* @__PURE__ */ React.createElement("h2", { className: "text-sm text-blue-300 mb-2 pb-2 border-b border-blue-800" }, "INPUTS \u2014 geometry & boundary conditions"), INPUT_CODES.map((code) => /* @__PURE__ */ React.createElement(Field, { key: code, code, value: fields[code], computed: computed.has(code), editable: status === "ready", onChange: handleFieldChange }))), /* @__PURE__ */ React.createElement("div", { className: "relative border border-blue-800 bg-blue-900/20 p-4" }, /* @__PURE__ */ React.createElement(CornerTicks, null), /* @__PURE__ */ React.createElement("h2", { className: "text-sm text-blue-300 mb-2 pb-2 border-b border-blue-800" }, "OUTPUTS \u2014 performance"), OUTPUT_CODES.map((code) => /* @__PURE__ */ React.createElement(Field, { key: code, code, value: fields[code], computed: computed.has(code), editable: status === "ready", onChange: handleFieldChange })))), /* @__PURE__ */ React.createElement("div", { className: "flex items-center gap-3 mt-5" }, /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: handleSolve,
